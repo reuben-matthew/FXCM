@@ -1,0 +1,958 @@
+---
+title: "Notional Retail Volume - `r ifelse(format(Sys.Date()-1, '%u') == 7, format(Sys.Date()-3, '%B %d, %Y'), format(Sys.Date()-1, '%B %d, %Y'))`"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+---
+
+```{r libraries Setup , include = FALSE}
+
+check.install.load<-function(package_names){
+  for (p in 1:length(package_names)){
+      if(!package_names[p] %in% installed.packages()){
+        install.packages(package_names[p], repos='http://cran.us.r-project.org')
+      }
+    library(package_names[p], character.only = TRUE)
+  }
+}
+
+check.install.load(c("flexdashboard", "magrittr", "RODBC", "data.table", "highcharter","dplyr", "readxl", "DT", "htmltools", "lubridate", "bizdays", "wesanderson"))
+
+```
+
+
+
+```{r Get Report Date and Set Parameter Queries, echo=FALSE}
+##
+{ 
+  
+  # Get Report Date
+  cal <- create.calendar(name="BusinessDaysCal", weekdays = c("saturday", "sunday"))
+  ReportDate <- adjust.previous(Sys.Date()-1,cal) # put date if ran historically
+
+
+  # set the volume loop starting month. We go back 13 months because if the dashboard is ran on e.g. March 1st 2019, we want to include February 2018.
+  numMonths <- 13
+  ReportMonth <- as.Date(paste0(year(ReportDate),'-',month(ReportDate),'-01')) %>% as.character()
+
+}
+```
+
+```{r Dbconnect function, include=FALSE}
+#connect to DB function	
+connecttodb = function(){	
+  
+  require(RODBC)	
+  
+  connline = paste0("driver={SQL Server};server=NJ1CPFIN001SQL\\FINSQL,49504;database=;Trusted_Connection=yes")	
+  
+  conn = odbcDriverConnect(connline)	
+  
+  return(conn)	
+}
+```
+
+```{r Themes, include = F}
+create.theme <-  function(colors){
+  thm <- hc_theme(
+    colors = colors,
+    chart = list(
+      backgroundColor = "#F5F8EF"
+    ),
+    title = list(
+      style = list(
+        color = '#333333',
+        font ="Courier New"
+      )
+    ),
+    legend = list(
+      itemStyle = list(
+        fontFamily = "Roboto",
+        color = 'black'
+      ),
+      itemHoverStyle = list(
+        color = 'gray'
+      )   
+    )
+  )
+  thm
+}
+
+thm_fx <- create.theme(colors = c("#1d8348", "#82e0aa"))
+
+thm_cfd <- create.theme(colors = c("#7b241c", "#d98880"))
+
+thm_totVol <- create.theme(colors = c("#1d8348"))
+
+thm_monVol <- create.theme(colors = c(rep('#7cb5ec',numMonths),'#BDB76B'))
+
+thm_dd <- create.theme(colors = c("#ff2700", "#008fd5"))
+
+thm_plat <- create.theme(colors = c('#e6194b', '#3cb44b', '#bcf60c', '#4363d8', '#00FFFF', '#9A6324','#a9a9a9', '#fabebe', '#008080', '#e6beff', '#9a6324', '#fffac8', '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075', '#808080'))
+
+thm_top5 <- create.theme(colors = c("#FF2700", "#008FD5", "#77AB43", "#636464", "#C4C4C4"))
+
+thm_crypto <- create.theme(colors = c(wes_palette("IsleofDogs1")[1:4],wes_palette("FantasticFox1")[-c(4)],wes_palette("Rushmore1")[c(3,4)]))
+
+```
+
+
+
+```{r Query Setup, include=FALSE}
+## Volume Data & Volatility Queries
+{
+  
+
+  # Volume Query
+  Query <- paste0("exec store..Daily_Dashboard_VolumeAllQuery @ReportMonth = '", ReportMonth, "', @numMonths = ", numMonths)
+
+  # Cryptocurrency Query
+  QueryCrypto <- paste0("exec store..Daily_Dashboard_CryptoQuery @ReportMonth = '", ReportMonth, "', @numMonths = ", numMonths)
+
+  # Baskets Query
+  QueryBasket <- paste0("exec store..Daily_Dashboard_BasketQuery @ReportMonth = '", ReportMonth, "', @numMonths = ", numMonths)
+  
+  #SCFD Queries
+  QuerySCFDVol <- paste0("exec store..Daily_Dashboard_SCFDQuery @ReportMonth = '", ReportMonth, "', @numMonths = ", numMonths)
+  QuerySCFDCount <- paste0("exec store..Daily_Dashboard_SCFDCountQuery @ReportMonth = '", ReportMonth, "', @numMonths = ", numMonths)
+  
+  
+  # get VIX and CVIX data
+  QueryVolatility <- "select * from keys..volatility"
+  
+
+}
+
+```
+
+```{r Query Execution, include=FALSE}
+# Execute Query
+{
+  
+  # Establish connection to SQL Server
+  conn <-connecttodb()
+  
+  # Get Volume Data
+  VolumeData <- data.table( sqlQuery(conn, Query, stringsAsFactors=FALSE) )
+
+  VolumeData[,date:=as.Date(tradedate,format="%Y-%m-%d")]
+  fixDates <- c('2018-05-05', '2020-02-08', '2020-03-28', '2020-12-19', '2021-06-12', '2021-10-23')
+  fixDatesf <- c('2021-05-16', '2021-11-07')
+  VolumeData$date <- if_else(VolumeData$tradedate %in% fixDates, true = VolumeData$date-1, false = VolumeData$date)
+  VolumeData[, date:=if_else(tradedate == "2019-04-19" & CurrencyType == "CFD",true = date-1, false = date)]
+  VolumeData$date <- if_else(VolumeData$tradedate %in% fixDatesf, true = VolumeData$date+1, false = VolumeData$date)
+  VolumeData <- VolumeData[!(tradedate =="2018-06-17")]
+ 
+ # Get Crypto volumes
+ CryptoData <- data.table(sqlQuery(conn, QueryCrypto, stringsAsFactors=FALSE) )
+ CryptoData[,date:=as.Date(tradedate,format="%Y-%m-%d")]
+ CryptoData$date <- if_else(CryptoData$tradedate %in% fixDates, true = CryptoData$date-1, false = CryptoData$date)
+ CryptoData[, date:=if_else(tradedate == "2019-04-19", true = date-1,false = date)]
+
+ # Get Basket volumes
+ BasketData <- data.table(sqlQuery(conn, QueryBasket, stringsAsFactors=FALSE))
+ BasketData[,date:=as.Date(tradedate,format="%Y-%m-%d")]
+ BasketData$date <- if_else(BasketData$tradedate %in% fixDates, true = BasketData$date-1, false = BasketData$date)
+
+ 
+ # Get SCFD volumes and count
+ SCFDVol <- data.table(sqlQuery(conn, QuerySCFDVol, stringsAsFactors=FALSE))
+ SCFDVol[,date:=as.Date(tradedate,format="%Y-%m-%d")]
+ SCFDCnt <- data.table(sqlQuery(conn, QuerySCFDCount, stringsAsFactors=FALSE))
+ SCFDCnt[,date:=as.Date(period,format="%Y-%m-%d")]
+ # SCFDVol$date <- if_else(SCFDVol$tradedate %in% fixDates, true = SCFDVol$date-1, false = SCFDVol$date)
+ 
+ #get VIX and CVIX data
+ ImpVols <- data.table(sqlQuery(conn, QueryVolatility, stringsAsFactors=FALSE))
+ ImpVols[,Date:=as.Date(Date, format = "%Y-%m-%d")]
+ 
+ # Close the connection
+  odbcClose(conn)
+}
+```
+
+
+
+```{r Prepare Chart Table data, include=FALSE}
+## Chart Data . Used in FX Volume Chart and CFD Volume Chart
+
+{ ##FX. Output : 3 columns : Total  FX volume by day, DD,NDD Volumes as portion of the total Volume.
+  FXData <- VolumeData %>% 
+            filter(CurrencyType=="FX" & Currency != "USDOLLAR") %>% 
+            group_by(date,CurrencyType,PricingModel) %>%
+            summarise( Notional_Volume= sum(notional)/1000000, .groups='drop') %>% as.data.table(.) %>% 
+            dcast(.,date~PricingModel,value.var="Notional_Volume",fun.agregate=sum) %>%
+            mutate(Notional_Volume =  DD+NDD
+                   ,DD= DD/Notional_Volume         
+                   ,NDD= NDD/Notional_Volume )%>%  #Notional value in Millions of USD
+    left_join(ImpVols, by =c("date"="Date") ) %>% select(date,Notional_Volume,CVIX,DD,NDD)
+  ## CFD
+  CFDData <- VolumeData %>% 
+    filter(CurrencyType %in% c("CFD", "SCFD")) %>% 
+    group_by(date) %>%
+    summarise( Notional_Volume= sum(notional)/1000000
+    ) %>% left_join(ImpVols, by =c("date"="Date") )   %>% select(date,Notional_Volume,VIX)      
+}
+```
+
+ Volume and Volatility Charts {data-orientation=rows}
+=====================================
+Row
+-------------------------------------
+
+
+```{r Set Thousands separator  and set y axis limits, include=FALSE}
+  hcoptslang <- getOption("highcharter.lang")     # set display options
+  hcoptslang$thousandsSep <- ","
+  options(highcharter.lang = hcoptslang)
+
+  maxFX <- max(FXData$Notional_Volume)
+  maxCFD <- max(CFDData$Notional_Volume)
+  maxCVIX <- round(max(FXData$CVIX),-1)
+  maxVIX <- round(max(CFDData$VIX),-1)
+```
+
+```{r FX Volume Chart Source Code ,echo=FALSE}
+## Changing anything here will have an effect on the Charts Displayed later
+  highchart() %>%
+  hc_chart( zoomType = "xy" ) %>%
+  hc_title(text = "FX Notional Retail Volume & CVIX (JPMorgan G7 Volatility Index)",
+           align = "center") %>%
+  hc_yAxis_multiples( list(title = list( text = "Measured in millions",                    #Adjusts the y_axis on the left
+                                         align = "middle",
+                                         style= list( fontWeight = "bold",
+                                                      color = "rgba(0,0,0,1)"   # black Color
+                                                    )
+                                        )#, max= maxFX
+
+                           ,labels = list(format = "{value:,.0f}")
+                          ),
+                      list(title = list( text = "",                          #Adjust the second  y_axis on the right
+                                         align = "middle",
+                                         style= list( fontWeight = "bold",
+                                                       color = "rgba(0,0,0,1)"   # black Color
+                                                    )
+                                        )#, max= maxCVIX
+
+                          ,opposite= TRUE
+                          )
+                    )  %>%
+  hc_add_series(FXData, hcaes(x = date, y = Notional_Volume), yAxis=0, name = "Notional Volume", type="line" ) %>%
+  hc_xAxis(type = 'datetime', labels = list(align='center'), dateTimeLabelFormats = list(day = '%Y-%m-%d',  week = '%Y-%m-%d', month = '%Y-%m')) %>%
+  # set the format of the hoverboxes. IF Y data is above 100  include up to 6-th digit after decimal , else include only up to 2nd.
+  hc_tooltip(pointFormatter = JS("function () {
+ Yvalue = this.y > 100 ? Highcharts.numberFormat(this.y,0): Highcharts.numberFormat(this.y,2)
+ return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Yvalue + '</b><br/>'; ;
+}"),
+             crosshairs = TRUE , shared = TRUE ) %>%
+  hc_add_series(FXData, hcaes(x = date, y = CVIX), name = "CVIX" ,yAxis=1, type="line") %>%
+  hc_add_theme(thm_fx) %>%
+  hc_plotOptions(series = list(marker = list(enabled = F))) %>%
+  hc_exporting(enabled = TRUE, filename = paste0("FXVolumeChart",ReportDate)) -> FXChart
+
+```
+
+```{r CFD Volume Chart Source Code , echo=FALSE}
+## Changing anything here will have an effect on the Charts Displayed later
+  highchart() %>%
+  hc_chart( zoomType = "xy" ) %>%
+  hc_title(text = "CFD Notional Retail Volume & VIX (CBOE Volatility Index)",
+           align = "center") %>%
+  hc_yAxis_multiples( list(title = list( text= "Measured in millions",        #Adjusts the y_axis on the left
+                                         align = "middle",
+                                         style= list( fontWeight = "bold",
+                                                      color = "rgba(0,0,0,1)"   # black Color
+                                                    )
+                                         ) #,max =maxCFD
+                                          ,labels = list(format = "{value:,.0f}")
+                          ),
+                        list( title = list( text = "",                   #Adjust the second  y_axis on the right
+                                            align = "middle",
+                                            style= list( fontWeight = "bold",
+                                                         color = "rgba(0,0,0,1)"   # black Color
+                                                        )
+                                          )#, max= maxVIX
+                                          ,opposite= TRUE
+                            )
+                    ) %>%
+  hc_add_series(CFDData, hcaes(x = date, y = Notional_Volume), name = "Notional Volume", yAxis=0 , type="line") %>% 
+  hc_xAxis(type = 'datetime', labels = list(align='center'), dateTimeLabelFormats = list(day = '%Y-%m-%d',  week = '%Y-%m-%d', month = '%Y-%m')) %>% # set the format of the hoverboxes. Affects both series.
+   # set the format of the hoverboxes. IF Y data is above 100  include up to 6-th digit after decimal , else include only up to 2nd.
+  hc_tooltip(pointFormatter = JS("function () {
+ Yvalue = this.y > 100 ? Highcharts.numberFormat(this.y,0): Highcharts.numberFormat(this.y,2)
+return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Yvalue + '</b><br/>'; ;
+}"),
+             crosshairs = TRUE , shared = TRUE ) %>%                  # Closest to the Excel color I could get
+  hc_add_series(CFDData, hcaes(x = date, y = VIX), name = "VIX" ,yAxis=1, type="line") %>%
+  hc_add_theme(thm_cfd) %>%
+  hc_plotOptions(series = list(marker = list(enabled = F))) %>%
+  hc_exporting(enabled = TRUE, filename = paste0("CFDVolumeChart",ReportDate)) -> CFDChart
+```
+
+
+### `r paste0("")`
+```{r FX Volume Chart Display ,echo=FALSE}
+#Display Chart
+  FXChart
+```
+
+
+### `r paste0("")`  {.mobile}
+```{r FX Volume Chart Mobile Display ,echo=FALSE}
+#Display Chart
+  FXChart
+```
+
+Row
+--------------------------------------
+
+### `r paste0("")`
+```{r CFD Volume Chart  Display, echo=FALSE}
+#Display Chart
+CFDChart
+
+```
+
+### `r paste0("")` {.mobile}
+
+```{r CFD Volume Chart Mobile Display ,echo=FALSE}
+#Display Chart
+CFDChart
+```
+
+
+
+Volume Data
+=====================================
+
+```{r Notional Volume Table and Monthly Averages ,include= FALSE}
+Table <- dcast.data.table(VolumeData, date ~ CurrencyType, value.var = "notional",
+                             fun.aggregate = sum)[,Total:=CFD+FX+SCFD,by= "date"]
+# Modify CFD column to include CFD and Share CFDs
+Table <- Table[,TotalCFD:=SCFD+CFD,by= "date"]
+Table <- Table[,CFD:=NULL]
+Table <- Table[,SCFD:=NULL]
+colnames(Table)[colnames(Table)=="TotalCFD"] <- "CFD"
+
+AverageVolumes <- Table %>% group_by(Month=floor_date(date, "month")) %>% summarise_at(vars(CFD,FX,Total),mean)
+colnames(AverageVolumes) <- c('Month', 'Average CFD Volume', 'Average FX Volume', 'Average Volume')
+
+MonthlyVolumes <- Table %>% group_by(Month=floor_date(date, "month")) %>% summarise_at(vars(CFD,FX,Total),sum)
+colnames(MonthlyVolumes) <- c('Month', 'CFD Volume', 'FX Volume', 'Total Volume')
+
+AvMonVol <- merge(MonthlyVolumes,AverageVolumes,by=c("Month")) %>% arrange(desc(Month)) %>% mutate(Month = format(Month, "%b %Y")) %>% select('Month', 'CFD Volume', 'FX Volume', 'Total Volume', 'Average CFD Volume','Average FX Volume','Average Volume')
+
+
+
+
+```
+
+Row
+---------------
+
+### `r paste0("")`
+``` {r Total Volume Chart, echo = FALSE}
+
+highchart() %>%
+    hc_chart( zoomType = "xy" ) %>%
+    hc_title(text = "Total Daily Volume",
+             align = "center") %>%
+    hc_yAxis( title = list( text = "Measured in millions",            #Adjusts the y_axis on the left
+                                           align = "middle",
+                                           style= list( fontWeight = "bold",
+                                                        color = "rgba(0,0,0,1)"   # black Color
+                                                      )
+                                          )
+                    ,labels = list(format = "{value:,.0f}")
+                  ) %>%
+    hc_xAxis(type = 'datetime', labels = list(align='center'), dateTimeLabelFormats = list(day = '%Y-%m-%d',  week = '%Y-%m-%d', month = '%Y-%m')) %>%  hc_legend(list(enabled = F)) %>%
+    hc_add_series(Table, hcaes(x = date, y = Total/1000000), name = "Total Volume", type='line', color = '#008fd5'
+        )  %>%
+    hc_tooltip(pointFormatter = JS("function () {
+ Yvalue = this.y > 100 ? Highcharts.numberFormat(this.y,0): Highcharts.numberFormat(this.y,3)
+return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Yvalue + '</b><br/>'; ;
+}"),
+             crosshairs = TRUE , shared = TRUE ) %>%
+
+    hc_add_theme(thm_totVol) %>%
+    hc_plotOptions(series = list(marker = list(enabled = F))) %>%
+    hc_exporting(enabled = TRUE, filename = paste0("totalVolumeChart",ReportDate))
+
+```
+
+
+### `r paste0("")`
+``` {r Create Monthly Volume Histogram, echo = FALSE}
+
+highchart() %>% hc_title(text = "Total Monthly Volume",
+             align = "center") %>%
+  hc_legend(list(enabled = F)) %>%
+    hc_yAxis( title = list( text = "Measured in millions",            #Adjusts the y_axis on the left
+                                           align = "middle",
+                                           style= list( fontWeight = "bold",
+                                                        color = "rgba(0,0,0,1)"   # black Color
+                                                      )
+                                          )
+                    ,labels = list(format = "{value:,.0f}")
+                  ) %>% hc_add_series(name = 'Total Monthly Volume',MonthlyVolumes$`Total Volume`/1000000, type = 'column', colorByPoint = TRUE)  %>% hc_xAxis(categories = format(MonthlyVolumes$Month, "%Y-%m")) %>%
+    hc_tooltip(pointFormatter = JS("function () {
+ Yvalue = this.y > 100 ? Highcharts.numberFormat(this.y,0): Highcharts.numberFormat(this.y,3)
+return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Yvalue + '</b><br/>'; ;
+}"),
+             crosshairs = TRUE , shared = TRUE ) %>%
+
+   hc_add_theme(thm_monVol) %>%
+     hc_plotOptions(series = list(marker = list(enabled = F))) %>%
+    hc_exporting(enabled = TRUE, filename = paste0("monthlyVolumeBarPlot",ReportDate))
+
+```
+
+
+Row
+------------------------
+
+
+```{r Arrange Data For Volume by day display ,include= FALSE}
+Table <- arrange(Table,desc(date)) %>% as.data.table() %>% select(date, CFD, FX, Total)
+
+```
+
+
+### `r paste0("")`
+```{r Volume By Day Table, echo = FALSE}
+# Table[,.(date ##  Format the number values
+#          ,CFD = paste("$", formatC(CFD, big.mark = ",",digits =0 ,format= "f"))
+#          ,FX = paste("$", formatC(FX, big.mark = ",",digits =0 ,format= "f") )
+#          ,Total = paste("$",formatC(Total, big.mark = ",",digits =0 ,format= "f"))
+#          ) ]  %>%
+Table %>%
+## Create the datatable using the wrapper for the Datatables JS library from package (DT)
+    datatable(.
+              ,options = list(  pageLength = 30, colReorder = list(realtime = FALSE)
+                                ,dom = 'Bftp'
+                                ,buttons = list(list(extend = 'excel', filename = paste0('volumeDaily',ReportDate)),
+                                                list(extend = 'csv', filename = paste0('volumeDaily',ReportDate)),
+                                                'copy')
+                                ,columnDefs = list(list(className = 'dt-center',
+                                                        ##, searchable = F,
+                                                        targets = 0:3)) # align the values center
+                                ##,info = F
+                                ##,paging = F
+                                )
+              ,extensions = c('ColReorder' , 'Buttons')
+              ## The footnote of the table
+              ,caption = htmltools::tags$caption(style = 'caption-side: top; text-align: left;'
+                                                 ,htmltools::strong( 'Note:'),htmltools::br("- Notional volume is measured in millions and converted to USD equivalent." )
+                                                 ,"- Previous month's rates are used to calculate the present month notional volume until we receive the present month average rates at the end of the month."
+                                                 ,htmltools::br("- When using the search box please use the yyyy-mm-dd format.")
+                                                  )
+              ##,filter = 'top'
+              ,rownames = FALSE
+              ##,select = TRUE
+              ,colnames = c('Date', 'CFD Volume', 'FX Volume', 'Total Volume')
+
+              ) %>%
+      formatCurrency(.,~CFD+FX+Total, currency = "$", digits=0)  %>%
+      formatDate(columns=~date)
+
+```
+
+
+
+### `r paste0("")`
+```{r Monthly&Average Volume Table, echo=FALSE}
+ datatable(AvMonVol
+           , options = list(pageLength = 14
+                            ,dom = 'Bt'
+                            ,buttons = list(list(extend = 'excel', filename = paste0('volumeMonthly',ReportDate)),
+                                                list(extend = 'csv', filename = paste0('volumeMonthly',ReportDate)),
+                                                list(extend = 'copy'))
+                            ,columnDefs = list(list(className = 'dt-center',orderable = F, searchable = F,
+                                                    #width = '14%',
+                                                 targets = '_all') ) # align the values center
+                            ,extensions = c('Buttons')
+                            ,info = F
+                            ,paging = F
+                            )
+           , rownames = FALSE
+           ,colnames = c('Month', 'CFD', 'FX', 'Monthly Total', 'Daily Average CFD', 'Daily Average FX', 'Daily Average')
+           ) %>%
+  formatCurrency(columns=2:ncol(AvMonVol),digits = 0)
+
+```
+
+
+
+
+Volume Breakdown
+=====================================
+Row {.tabset .tabset-fade}
+--------------------------------------
+
+```{r Breakdown Data By Platform and Execution Type, echo=FALSE}
+{
+  # Get Breakdowns data
+  DD_NDDBreakdown <- VolumeData %>%             ## Measure in Millions
+                      filter(Currency != "USDOLLAR")%>%
+                      mutate(notional= notional/1000000) %>%
+                      dcast (.,date~CurrencyType+PricingModel
+                             ,value.var = "notional"
+                             ,fun.aggregate = sum
+                             )
+
+
+# create factor levels for Interface column to be ordered alphabetically with "Other GUI" last
+fInterface <- unique(sort(VolumeData$Interface))
+fInterface <- c(fInterface[which(fInterface != "Other GUI")], "Other GUI")
+
+InterfaceBreakdown <- VolumeData %>%                  ## Measure in Millions
+                       mutate(Month = floor_date(date, "month"),
+                              notional= notional/1000000,
+                              Interface = factor(Interface, levels = fInterface)) %>%
+  dcast (Month~Interface
+                             ,value.var = "notional"
+                             ,fun.aggregate = sum
+                             )
+InterfaceBreakdownSeries <- InterfaceBreakdown %>% melt(.,id.vars="Month") %>% group_by( name  = variable) %>%
+                    do(data = .$value)
+
+
+
+# Split Data by Client Type
+MonthlyVolumesByClientType <- VolumeData %>% mutate(Month = floor_date(date, "month"), notional = notional/1000000) %>%  dcast(Month~ClientType, value.var = "notional", fun.aggregate = sum)
+
+MonthlyVolumesByClientTypeSeries <- MonthlyVolumesByClientType %>% melt(.,id.vars="Month") %>% group_by( name  = variable) %>%
+                    do(data = .$value)
+
+
+
+}
+```
+
+
+```{r Monthly Volume by Client Type Stacked Area Source Code}
+
+# create stacked area chart
+MonthlyVolClientTypeChart <- highchart() %>%
+  hc_chart( type = "area") %>%
+  hc_title(text = "") %>%
+  hc_yAxis( title = list( text = "Measured in millions",            #Adjusts the y_axis on the left
+                                         align = "middle",
+                                         style= list( fontWeight = "bold",
+                                                      color = "rgba(0,0,0,1)"   # black Color
+                                                    )
+                                        )
+                  ,labels = list(format = "{value:,.0f}")
+                ) %>%
+  hc_xAxis(categories = format(MonthlyVolumesByClientType$Month, "%Y-%m"))%>%
+  hc_add_series_list(MonthlyVolumesByClientTypeSeries) %>%
+  hc_tooltip(pointFormatter = JS("function () {
+ return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Highcharts.numberFormat(this.y,0) + '</b><br/>'; ;
+}"),   crosshairs = TRUE , shared = TRUE ) %>%
+
+  hc_add_theme(thm_dd) %>%
+  hc_plotOptions(area = list(stacking = 'normal', fillOpacity = 0.3)) %>%
+  hc_exporting(enabled = TRUE, filename = paste0("clientTypeChart",ReportDate))
+
+```
+
+```{r DD_NDD Breakdown Source Code ,echo=FALSE}
+## Changing anything here will have an effect on the Charts Displayed later
+  highchart() %>%
+  hc_chart( zoomType = "xy" ) %>%
+  hc_yAxis( title = list( text = "Measured in millions",            #Adjusts the y_axis on the left
+                                         align = "middle",
+                                         style= list( fontWeight = "bold",
+                                                      color = "rgba(0,0,0,1)"   # black Color
+                                                    )
+                                        )
+                  ,labels = list(format = "{value:,.0f}")
+                ) %>%
+  hc_xAxis(type = 'datetime', labels = list(align='center'), dateTimeLabelFormats = list(day = '%Y-%m-%d',  week = '%Y-%m-%d', month = '%Y-%m')) %>%
+  hc_add_series(DD_NDDBreakdown, hcaes(x = date, y = FX_DD), name = "FX DD", type="area") %>%
+  hc_add_series(DD_NDDBreakdown, hcaes(x = date, y = FX_NDD), name = "FX NDD", type="area") %>%
+  hc_tooltip(pointFormatter = JS("function () {
+ return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Highcharts.numberFormat(this.y,0) + '</b><br/>'; ;
+}"),   crosshairs = TRUE , shared = TRUE ) %>%
+
+  hc_add_theme(thm_dd) %>%
+  hc_plotOptions(series = list(marker = list(enabled = F)), area = list(stacking = 'undefined', fillOpacity = 0.3)) %>%
+  hc_exporting(enabled = TRUE, filename = paste0("execTypeChart",ReportDate)) -> DD_NDDChart
+
+```
+
+
+```{r Interface Breakdown Source Code, echo=FALSE}
+## Changing anything here will have an effect on the Charts Displayed later
+
+InterfaceChart <- highchart() %>%
+  hc_chart( type = "column") %>%
+  hc_title(text = "") %>%
+  hc_yAxis( title = list( text = "Measured in millions",            #Adjusts the y_axis on the left
+                                         align = "middle",
+                                         style= list( fontWeight = "bold",
+                                                      color = "rgba(0,0,0,1)"   # black Color
+                                                    )
+                                        )
+                  ,labels = list(format = "{value:,.0f}")
+                ) %>%
+  hc_xAxis(categories = format(InterfaceBreakdown$Month, "%Y-%m"))%>%
+  hc_add_series_list(InterfaceBreakdownSeries) %>%
+  hc_tooltip(pointFormatter = JS("function () {
+                                 return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Highcharts.numberFormat(this.y,0) + '</b><br/>'; ;
+                                 }"),   crosshairs = TRUE , shared = TRUE ) %>%
+
+  hc_add_theme(thm_plat) %>%
+  hc_plotOptions(series = list(marker = list(enabled = F))) %>%
+  hc_exporting(enabled = TRUE, filename = paste0("platformChart",ReportDate))
+
+```
+
+
+### By Client Type {.no-mobile}
+```{r By Client Type Chart Display, echo=FALSE}
+MonthlyVolClientTypeChart
+```
+
+### By Execution Type {.no-mobile}
+```{r DD_NDD Chart Display ,echo=FALSE}
+ DD_NDDChart
+```
+
+### By Platform {.no-mobile}
+```{r Interface Breakdown Chart Display ,echo=FALSE}
+InterfaceChart
+```
+
+Row
+--------------------------------------
+
+
+```{r Top 5 Products for the Month Data   ,echo=FALSE}
+
+{ # Get Top 5 Products by Product type.
+  Top5<- VolumeData %>%                   ## 31 Days Back
+              filter( month(date) == month(ReportMonth))%>%
+              mutate(notional= notional/1000000) %>%
+              group_by( Currency,CurrencyType) %>%
+              summarise(notional=sum(notional)) %>%  # Aggregate across books
+              group_by(CurrencyType)%>%               # Subset by Product Type
+              top_n(n=5,wt=notional)           # Get top 5 values for eacht product type category,
+                                                          # Top 5 by Notional Volume
+
+  Top5Volume <- VolumeData %>%
+                filter(Currency %in% Top5$Currency
+
+                       ) %>%
+                group_by(date,CurrencyType,Currency) %>%
+                summarise(notional= sum(notional)/1000000)
+  Top5FX <- Top5Volume %>%
+             filter(CurrencyType == "FX")
+  names(Top5FX) <- c('date', 'CurrencyType', 'symbol', 'num')
+  Top5CFD <- Top5Volume %>%
+             filter(CurrencyType == "CFD")
+  names(Top5CFD) <- c('date', 'CurrencyType', 'symbol', 'num')
+
+  # Top5FX <- Top5Volume %>%
+  #           filter(CurrencyType == "FX") %>%
+  #           dcast(.,date~Currency ,value.var="notional", fun.aggregate=sum)
+  # 
+  # Top5CFD <- Top5Volume %>%
+  #           filter(CurrencyType == "CFD") %>%
+  #           dcast(.,date~Currency ,value.var="notional", fun.aggregate=sum)
+
+## Structure the data so it is able to be charted with hc_add_series_list
+  # Top5FXSeries <- Top5FX %>% melt(.,id.vars="date") %>%
+  #                   group_by( name  = variable) %>%
+  #                   do(data = .$value , type = "line")
+  # 
+  # 
+  # Top5CFDSeries <- Top5CFD %>% melt(.,id.vars="date") %>%
+  #                   group_by( name  = variable) %>%
+  #                   do(data = .$value , type = "line")
+  # 
+
+}
+
+# Function to create a chart with multiple series
+# !!! Names of the chart have to be data, symbol and num
+create.product.chart <- function(data, chartTitle = "chart", xTitle = "", yTitle = "", exportTitle = "chart", theme) {
+
+  chart <- hchart(data, type = 'line', hcaes(y = num, group = symbol, x = date)) %>%
+  hc_chart( zoomType = "xy" ) %>%
+  hc_title(text = chartTitle,
+           align = "center") %>%
+  hc_yAxis( title = list( text = yTitle,            #Adjusts the y_axis on the left
+                                         align = "middle",
+                                         style= list( fontWeight = "bold",
+                                                      color = "rgba(0,0,0,1)"   # black Color
+                                                    )
+                                        )
+                  ,labels = list(format = "{value:,.0f}")
+                ) %>%
+  hc_xAxis(title = xTitle, type = 'datetime', labels = list(align='center'), dateTimeLabelFormats = list(day = '%Y-%m-%d',  week = '%Y-%m-%d', month = '%Y-%m')) %>%
+  hc_tooltip(pointFormatter = JS("function () {
+ return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Highcharts.numberFormat(this.y,0) + '</b><br/>'; ;
+}"),   crosshairs = TRUE , shared = TRUE ) %>%
+  hc_add_theme(theme) %>%
+  hc_plotOptions(series = list(marker = list(enabled = F))) %>%
+  hc_exporting(enabled = TRUE, filename = paste0(exportTitle,ReportDate))
+
+  chart
+
+}
+```
+
+
+
+```{r Top 5 Breakdown FX&CFDs Chart Source Code ,echo=FALSE}
+
+  Top5ChartFX <- create.product.chart(data = Top5FX, chartTitle = "Top 5 FX Products for the Current Month", yTitle = "Measured in millions", exportTitle = "topFXChart", theme = thm_top5)
+Top5ChartCFD <- create.product.chart(data = Top5CFD, chartTitle = "Top 5 CFD Products for the Current Month", yTitle = "Measured in millions", exportTitle = "topCFDChart", theme = thm_top5)
+```
+
+
+
+### `r paste0("")` {.no-mobile}
+```{r Top 5 Breakdown FX Chart Display,echo=FALSE}
+Top5ChartFX
+```
+
+
+### `r paste0("")` {.no-mobile}
+```{r Top 5 Breakdown CFD Chart Display,echo=FALSE}
+Top5ChartCFD
+```
+
+
+Crypto Products
+=====================================
+
+```{r Breakdown Crypto Data, echo=FALSE}
+
+
+# Function which casts the data, calculates aggregate sum for all dates and then gathers back the data so it can be used to create line series in the chart. If it's grouped and summarised directly (without casting and melting), each currency line will miss the dates when there was no volume in it
+create.product.series <- function(data, variable, factorList) {
+  series <- data %>%
+                      mutate(format(data[,get(variable)], digits = 0)
+                             ,Currency = factor(Currency, levels = factorList) # create factor to make the dcast function preserve the order of the symbols
+                             ) %>%  ## Measure in Millions
+                      dcast (.,date~Currency
+                             ,value.var = variable
+                             ,fun.aggregate = sum
+                             ) %>% 
+  tidyr::gather(key = symbol, value = num, -1)
+  # make the gathered symbol column as factor so as to preserve the order of the symbols in the chart
+  series$symbol <- factor(series$symbol, levels = factorList)
+  series
+  
+}
+
+#make crypto products appear in the chart in the same order as in the volume data
+fCrypto <- unique(CryptoData$Currency)
+
+CryptoBreakdownVol <- create.product.series(CryptoData, variable = "notional", factorList = fCrypto)
+
+CryptoBreakdownTrades <- create.product.series(CryptoData, variable = "TradesCount", factorList = fCrypto)
+
+CryptoBreakdownTraders <- create.product.series(CryptoData, variable = "TraderCount", factorList = fCrypto)
+
+
+
+
+```
+
+
+```{r Cryptocurrency Chart Source Code, echo=FALSE}
+## Changing anything here will have an effect on the Charts Displayed later
+
+
+
+Crypto_Volume_Chart <- create.product.chart(data = CryptoBreakdownVol, chartTitle = "Notional Volume", yTitle = "Measured in dollars", exportTitle = "cryptoVolumeChart", theme = thm_crypto)
+Crypto_Trader_Count_Chart <- create.product.chart(data = CryptoBreakdownTraders, chartTitle = "Trader Count", exportTitle = "cryptoTraderChart", theme = thm_crypto)
+Crypto_Trades_Count_Chart <- create.product.chart(data = CryptoBreakdownTrades, chartTitle = "Trades Count", exportTitle = "cryptoTradesChart", theme = thm_crypto)
+
+
+
+```
+
+Row
+-------------------------------------
+
+### `r paste0("")`
+
+```{r Cryptocurrency Volume Chart Display ,echo=FALSE}
+#Display Chart
+Crypto_Volume_Chart
+```
+
+Row
+-------------------------------------
+
+### `r paste0("")`
+
+```{r Cryptocurrency Trades Count Chart Display ,echo=FALSE}
+#Display Chart
+Crypto_Trades_Count_Chart
+
+```
+
+
+### `r paste0("")`
+```{r Cryptocurrency Trader Count Chart Display, echo=FALSE}
+#Display Chart
+Crypto_Trader_Count_Chart
+```
+
+
+
+Basket Products
+=====================================
+
+```{r Create Basket Data, echo=FALSE}
+
+#make basket products appear in the chart in the same order as in the volume data
+fBasket <- unique(BasketData$Currency)
+
+BasketBreakdownVol <- create.product.series(BasketData, variable = "notional", factorList = fBasket)
+
+BasketBreakdownTrades <- create.product.series(BasketData, variable = "TradesCount", factorList = fBasket)
+
+BasketBreakdownTraders <-create.product.series(BasketData, variable = "TraderCount", factorList = fBasket)
+
+
+```
+
+```{r Create Basket Charts,echo=FALSE}
+
+Basket_Volume_Chart <- create.product.chart(data = BasketBreakdownVol, chartTitle = "Notional Volume", yTitle = "Measured in dollars", exportTitle = "basketVolumeChart", theme = thm_crypto)
+
+Basket_Trader_Count_Chart <- create.product.chart(data = BasketBreakdownTraders, chartTitle = "Trader Count", exportTitle = "basketTradersChart", theme = thm_crypto)
+
+Basket_Trades_Count_Chart <- create.product.chart(data = BasketBreakdownTrades, chartTitle = "Trades Count", exportTitle = "basketTradesChart", theme = thm_crypto)
+
+
+```
+
+Row
+-------------------------------------
+
+### `r paste0("")`
+
+```{r Basket Volume Chart Display, echo=FALSE}
+#Display Chart
+Basket_Volume_Chart
+```
+
+Row
+-------------------------------------
+
+### `r paste0("")`
+
+```{r Basket Trades Count Chart Display, echo=FALSE}
+#Display Chart
+Basket_Trades_Count_Chart
+
+```
+
+
+### `r paste0("")`
+```{r Basket Trader Count Chart Display, echo=FALSE}
+#Display Chart
+Basket_Trader_Count_Chart
+```
+
+
+
+Share CFD Products
+=====================================
+
+```{r Create SCFD Data, echo=FALSE}
+
+#make basket products appear in the chart in the same order as in the volume data
+fSCFD <- unique(SCFDVol$Currency)
+fSCFD <- c(fSCFD[fSCFD != "All"], 'All')
+SCFDBreakdownVol <- create.product.series(SCFDVol, variable = "notional", factorList = fSCFD)
+SCFDBreakdowntot <- aggregate( num ~ date, SCFDBreakdownVol,sum)
+
+```
+
+### `r paste0("")`
+
+```{r SCFD Volume Chart bar, echo=FALSE}
+#Display Chart
+
+  SCFDcolumnchart <- hchart(SCFDBreakdownVol, type = 'line', hcaes(y = num, group = symbol, x = date)) %>%
+  hc_chart( zoomType = "xy" ) %>%
+  hc_title(text = "The Current Month's Top 5 and All SCFD Products",
+           align = "center") %>%
+  hc_yAxis( title = list( text = "Measured in dollars",            #Adjusts the y_axis on the left
+                                         align = "middle",
+                                         style= list( fontWeight = "bold",
+                                                      color = "rgba(0,0,0,1)"   # black Color
+                                                    )
+                                        )
+                  ,labels = list(format = "{value:,.0f}")
+                ) %>%
+  hc_xAxis(title = '', type = 'datetime', labels = list(autoRotationLimit = 120, align='center', y=30), dateTimeLabelFormats = list(day = '%Y-%m-%d',  week = '%Y-%m-%d', month = '%Y-%m')) %>%
+  #hc_add_series(SCFDBreakdowntot, "line", hcaes(x = date, y = num), name = 'Total')  %>%
+  hc_tooltip(pointFormatter = JS("function () {
+ return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Highcharts.numberFormat(this.y,0) + '</b><br/>'; ;
+}"),   crosshairs = TRUE , shared = TRUE ) %>%
+  hc_add_theme(thm_plat) %>%
+  hc_plotOptions(series = list(marker = list(enabled = F))) %>%
+  hc_exporting(enabled = TRUE, filename = paste0('SCFDVolume',ReportDate))
+
+  SCFDcolumnchart
+
+```
+
+
+Row
+-------------------------------------
+
+
+### `r paste0("")`
+``` {r Total Trader Count, echo = FALSE}
+#SCFDTraders <- aggregate(TraderCount ~ tradedate, SCFDVol,sum)
+#SCFDTraders <-  SCFDVol[SCFDVol$Currency == 'All',]
+
+# SCFDTraders$date = substr(SCFDTraders$tradedate,1,nchar(SCFDTraders$tradedate)-3)
+# 
+# SCFDTraderCount <- aggregate(TraderCount ~ date, SCFDTraders,sum)
+# 
+# SCFDTraderCount$date <- paste( SCFDTraderCount$date,"-01",sep="")
+# 
+# SCFDTraderCount <- arrange(SCFDTraderCount,date) %>% as.data.table()%>% mutate(Date = format(as.Date(date), "%b %Y"))
+SCFDTraderCount <- arrange(SCFDCnt,date) %>% as.data.table()%>% mutate(Date = format(as.Date(date), "%b %Y"))
+
+
+highchart() %>%
+    hc_chart( zoomType = "xy" ) %>%
+    hc_title(text = "SCFD Trader Count per Month ",
+             align = "center") %>%
+    hc_yAxis( title = list( text = "Number of Traders",            #Adjusts the y_axis on the left
+                                           align = "middle",
+                                           style= list( fontWeight = "bold",
+                                                        color = "rgba(0,0,0,1)"   # black Color
+                                                      )
+                                          )
+                    ,labels = list(format = "{value:,.0f}")
+                  ) %>%
+    hc_xAxis(categories = SCFDTraderCount$Date) %>%
+    hc_legend(list(enabled = F)) %>%
+    hc_add_series(name = "Total Count", data = SCFDTraderCount, hcaes(x = Date, y = TraderCount), type='column', color = '#008fd5'
+        )  %>%
+    hc_tooltip(pointFormatter = JS("function () {
+ Yvalue = this.y > 100 ? Highcharts.numberFormat(this.y,0): Highcharts.numberFormat(this.y,3)
+return  '<span style=\"color:' + this.series.color + ';\">*</span> ' + this.series.name + ': <b>' + Yvalue + '</b><br/>'; ;
+}"),
+             crosshairs = TRUE , shared = TRUE ) %>%
+
+    hc_add_theme(thm_totVol) %>%
+    hc_plotOptions(series = list(marker = list(enabled = F))) %>%
+    hc_exporting(enabled = TRUE, filename = paste0("TraderCount",ReportDate))
+
+
+```
