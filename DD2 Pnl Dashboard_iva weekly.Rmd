@@ -1,0 +1,170 @@
+---
+title: "DD2 Customer PnL - `r ifelse(format(Sys.Date()-1, '%u') == 7, format(Sys.Date()-3, '%B %d, %Y'), format(Sys.Date()-1, '%B %d, %Y'))`"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+---
+
+```{r libraries Setup , include = FALSE}
+
+check.install.load<-function(package_names){
+  for (p in 1:length(package_names)){
+      if(!package_names[p] %in% installed.packages()){
+        install.packages(package_names[p], repos='http://cran.us.r-project.org')
+      }
+    library(package_names[p], character.only = TRUE)
+  }
+}
+
+check.install.load(c("flexdashboard", "magrittr", "RODBC", "data.table", "highcharter","dplyr", "readxl", "DT", "htmltools", "lubridate", "bizdays", "wesanderson","tseries","xts","plyr"))
+
+```
+
+
+```{r Dbconnect function, include=FALSE}
+#connect to DB function	
+connecttodb = function(){	
+  
+  require(RODBC)	
+  
+  connline = paste0("driver={SQL Server};server=nyacctsql02;database=;Trusted_Connection=yes")	
+  
+  conn = odbcDriverConnect(connline)	
+  
+  return(conn)	
+}
+```
+```{r Get Report Date and Set Parameter Queries, echo=FALSE}
+##
+{ 
+  
+  # Get Report Date
+  cal <- create.calendar(name="BusinessDaysCal", weekdays = c("saturday", "sunday"))
+  ReportRun <- Sys.Date()-3         # put date if ran historically
+  ReportDate <- adjust.previous(ReportRun-30,cal)
+ 
+  PnlStart <- as.Date(paste0(year(ReportDate),'-',month(ReportDate),'-01'))  %>% as.character()
+ }
+```
+
+```{r Themes, include = F}
+create.theme <-  function(colors){
+  thm <- hc_theme(
+    colors = colors,
+    chart = list(
+      backgroundColor = "#F5F8EF"
+    ),
+    title = list(
+      style = list(
+        color = '#333333',
+        font ="Courier New"
+      )
+    ),
+    legend = list(
+      itemStyle = list(
+        fontFamily = "Roboto",
+        color = 'black'
+      ),
+      itemHoverStyle = list(
+        color = 'gray'
+      )   
+    )
+  )
+  thm
+}
+
+thm_Vol <- create.theme(colors = c("#1d8348"))
+
+
+```
+
+```{r Query Setup, include=FALSE}
+## Volume Data & Volatility Queries
+{
+  
+
+  # Volume Query
+  Query <- paste0("select * from reports..CustomerPnL_v1 where period >='2020-10-01' and book_name like '%DD2%' order by period asc")
+  
+}
+
+```
+
+```{r Query Execution, include=FALSE}
+# Execute Query
+{
+  
+  # Establish connection to SQL Server
+  conn <-connecttodb()
+  
+  
+  DD2Pnl <- data.table( sqlQuery(conn, Query, stringsAsFactors=FALSE) )
+
+  #PnlData[,report_dt:=as.Date(report_dt,format="%m/%d/%Y")]    # convert to appropriate format
+ 
+  DD2Pnl$profit<- -1 * DD2Pnl$total_pl
+  
+  #DD2Pnl<-DD2Pnl[report_dt <= '2021-05-29']
+  
+
+ # Close the connection
+  odbcClose(conn)
+}
+```
+
+```{r Prepare Chart Table data, include=FALSE}
+## Chart Data . Used in FX Volume Chart and CFD Volume Chart
+
+{ ##FX. Output : 3 columns : Total  FX volume by day, DD,NDD Volumes as portion of the total Volume.
+  if (is.null(DD2Pnl$currencytype) == TRUE){
+    stop('There are nulls in the currencytype')}
+  
+  if (nrow(unique(DD2Pnl%>%select('period','report_dt','report_id','server_name','credit_line','symbol','book_name'))) != nrow(DD2Pnl)){
+    stop('There are more rows for a date than expected')
+  }
+  
+  # Total daily pnl
+  sumpnl<- DD2Pnl %>%
+            group_by (report_dt) %>%
+            summarize (profit = sum(profit))
+
+  print(paste0('Mean daily pnl: ',mean(sumpnl$profit)))
+  print(paste0('Max daily pnl: ',max(sumpnl$profit)))
+  print(paste0('Min daily pnl: ',min(sumpnl$profit)))
+  
+
+  #drawdowns
+
+  drawdowns <- data.frame(period = format(sumpnl$report_dt, '%Y-%m-01'),
+                          report_dt = format(sumpnl$report_dt, '%Y-%m-%d'),
+                          profit = sumpnl$profit )
+  
+  drawdowns$cumsum =  cumsum(drawdowns$profit)
+  drawdowns$cummax =  cummax(drawdowns$cumsum)
+  drawdowns$drawdown = 0
+  drawdowns$drawdown_pct=0
+  
+    for ( i in seq_along (drawdowns$cumsum))
+  {if (i == 1 ) {next}
+    else 
+      {if (drawdowns$cumsum[i] < drawdowns$cumsum[i-1] )
+        {drawdowns$drawdown[i] = drawdowns$cummax[i] - drawdowns$cumsum[i]
+        drawdowns$drawdown_pct[i] = ((drawdowns$cummax[i] - drawdowns$profit[i])/drawdowns$cummax[i]) * 100 }
+    
+  }}
+  
+  print(paste0('Max Drawdown pnl: ',max(drawdowns$drawdown)))
+
+
+  DD2Pnl$currencytype<- gsub('SCFD','CFD',DD2Pnl$currencytype)
+  
+  
+  currencypnl<- DD2Pnl %>%
+            group_by (currencytype) %>%
+            summarize (total_profit = sum(profit))
+  
+  print(paste0('CFD Pnl: ',currencypnl$drawdown))
+  print(paste0('FX Pnl: ',currencypnl$drawdown))
+}
+```
